@@ -1,0 +1,4 @@
+# Rename this file to .env and fill in the values
+DATABRICKS_TOKEN=
+DATABRICKS_SERVER_HOSTNAME= #just host name without https://
+DATABRICKS_HTTP_PATH=

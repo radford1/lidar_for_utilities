@@ -1,0 +1,93 @@
+bundle:
+  name: lidarviz
+
+variables:
+  CATALOG:
+    description: The pre-defined catalog
+    default: "workspace"
+  WAREHOUSE_ID:
+    default: ""
+    description: The warehouse id you have access to
+  MAPBOX_TOKEN:
+    description: The mapbox token
+    default: ""
+sync:
+  include:
+    - ./server/public
+
+artifacts:
+  default:
+    build: npm run build:client --prefix server
+
+resources:
+  
+  apps:
+    lidarviz-app:
+      name: "lidarviz"
+      description: "lidar visualization"
+      source_code_path: ./server
+  
+
+  pipelines:
+    lidar-processing:
+      name: "lidar-processing"
+      configuration:
+        source_catalog: ${var.CATALOG}
+      libraries:
+        - glob:
+            include: notebooks/Ingest_Metadata.py
+        - glob:
+            include: notebooks/Ingest_Points.py
+        - glob:
+            include: notebooks/Static_Line_Topology.py
+        - glob:
+            include: notebooks/Raster_Placeholder.py
+        - glob:
+            include: notebooks/Clipped_Lidar.py
+        - glob:
+            include: notebooks/PoorMan_Clustering.py
+      schema: lidar_bronze
+      continuous: false
+      development: false
+      photon: true
+      channel: PREVIEW
+      catalog: ${var.CATALOG}
+      serverless: true
+      environment:
+        dependencies:
+          - laspy[lazrs,laszip]
+          - pyproj
+
+  jobs:
+    data_ingestion_job:
+      name: "lidar-data-ingestion"
+      parameters:
+        - name: CATALOG 
+          default: "${var.CATALOG}"
+        - name: PRINCIPAL
+          default: "${databricks_app.lidarviz-app.service_principal_client_id }"
+        - name: WAREHOUSE_ID
+          default: "${var.WAREHOUSE_ID}"
+        - name: MAPBOX_TOKEN
+          default: "${var.MAPBOX_TOKEN}"
+      tasks:
+        - task_key: project_setup
+          notebook_task:
+            notebook_path: notebooks/Project_Setup.py
+        - task_key: pipeline_ingestion
+          pipeline_task:
+            pipeline_id: "${databricks_pipeline.lidar-processing.id }"
+          depends_on:
+            - task_key: project_setup
+        - task_key: grant_catalog_usage
+          notebook_task:
+            notebook_path: notebooks/Grant_Catalog_Usage.py
+          depends_on:
+            - task_key: pipeline_ingestion
+
+targets:
+  dev:
+    mode: development
+    default: true
+  community:
+    mode: development

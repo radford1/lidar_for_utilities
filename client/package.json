@@ -1,0 +1,35 @@
+{
+  "name": "lidarviz-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@deck.gl/core": "^9.0.33",
+    "@deck.gl/geo-layers": "^9.0.33",
+    "@deck.gl/layers": "^9.0.33",
+    "@deck.gl/react": "^9.0.33",
+    "mapbox-gl": "^2.15.0",
+    "react-router-dom": "^6.26.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-map-gl": "^7.1.6",
+    "dagre": "^0.8.5",
+    "reactflow": "^11.10.1",
+    "react-zoom-pan-pinch": "^3.1.3",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.2",
+    "@types/dagre": "^0.7.52"
+  }
+}
