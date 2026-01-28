@@ -88,11 +88,5 @@ def bronze_lidar_points():
         .selectExpr("*","h3_longlatash3string(longitude, latitude, 10) as h3_10")
     )
 
-# @dp.table(
-#     name = "silver_lidar_points_h3"
-# )
-# def silver_lidar_points_h3():
-#     return (
-#         spark.readStream.table("bronze_lidar_point_cloud_batch_dave_streaming")
-#     )
+
 

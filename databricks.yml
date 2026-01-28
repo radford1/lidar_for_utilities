@@ -26,6 +26,8 @@ resources:
       name: "lidarviz"
       description: "lidar visualization"
       source_code_path: ./server
+      compute_size: LARGE
+
   
 
   pipelines:
@@ -89,5 +91,5 @@ targets:
   dev:
     mode: development
     default: true
-  community:
+  prod:
     mode: development
