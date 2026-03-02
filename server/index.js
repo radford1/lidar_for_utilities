@@ -12,19 +12,6 @@ app.use(cors({ origin: '*'}));
 
 const db = new DatabricksSql({});
 
-(async () => {
-  try {
-    const ok = await db.testConnection();
-    if (ok) {
-      console.log('DBSQL connection OK');
-    } else {
-      console.warn('DBSQL connection test failed');
-    }
-  } catch (e) {
-    console.warn('DBSQL test failed:', e.message);
-  }
-})();
-
 app.set('db', db);
 
 app.use('/api', (req, _res, next) => { req.db = db; next(); }, h3Router);
@@ -44,5 +31,3 @@ const port = process.env.PORT || 3001;
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
 });
-
-
