@@ -22,10 +22,12 @@ export default function App() {
     pitch: 0
   });
   const [h3, setH3] = useState<string[]>([]);
-  const [selectedH3s, setSelectedH3s] = useState<string[]>([]);
+  const [selectedH3s, setSelectedH3s] = useState<Set<string>>(new Set());
   const [points, setPoints] = useState<LidarPoint[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [poles, setPoles] = useState<Pole[]>([]);
+  const [rendering3d, setRendering3d] = useState(false);
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [showEncroachment, setShowEncroachment] = useState(false);
   const [showFireRisk, setShowFireRisk] = useState(false);
   const [showVegIcons, setShowVegIcons] = useState(false);
@@ -151,6 +153,8 @@ export default function App() {
     return () => { window.cancelAnimationFrame(raf); };
   }, []);
 
+  const selectedH3List = useMemo(() => Array.from(selectedH3s), [selectedH3s]);
+
   const h3Layer = useMemo(() => new H3HexagonLayer({
     id: 'h3-cells',
     data: h3,
@@ -162,6 +166,9 @@ export default function App() {
     lineWidthMinPixels: 1,
     getHexagon: (d: string) => d,
     getFillColor: (d: string) => {
+      if (selectedH3s.has(d)) {
+        return [0, 220, 255, 150];
+      }
       if (showFireRisk && fireRiskMap.has(d)) {
         const v = fireRiskMap.get(d)!;
         const t = Math.max(0, Math.min(1, (v - fireRiskRange.min) / (fireRiskRange.max - fireRiskRange.min)));
@@ -175,9 +182,12 @@ export default function App() {
         const [r, g, b] = palette[idx];
         return [r, g, b, 70]; // dimmer, more transparent
       }
-      return selectedH3s.includes(d) ? [255, 200, 0, 140] : [0, 128, 255, 80];
+      return [0, 128, 255, 80];
     },
     getLineColor: (d: string) => {
+      if (selectedH3s.has(d)) {
+        return [255, 255, 255, 255];
+      }
       if (showEncroachment && encroachingH3.has(d)) {
         const alpha = Math.round(160 + 95 * pulse); // 160..255 (brighter)
         return [255, 0, 0, alpha];
@@ -185,6 +195,9 @@ export default function App() {
       return [30, 60, 90, 120];
     },
     getLineWidth: (d: string) => {
+      if (selectedH3s.has(d)) {
+        return 3;
+      }
       if (showEncroachment && encroachingH3.has(d)) {
         return 3 + 2 * pulse; // 3..5 px (thicker)
       }
@@ -215,7 +228,6 @@ export default function App() {
       }
     },
     onClick: (info, _event) => {
-      void (async () => {
       if (info.object) {
         const h3Hex = info.object as string;
           // Right-click: open workorder popup instead of selection
@@ -232,81 +244,18 @@ export default function App() {
             setWoResult(null);
             return;
           }
-          const next = selectedH3s.includes(h3Hex)
-            ? selectedH3s.filter(x => x !== h3Hex)
-            : [...selectedH3s, h3Hex];
-          setSelectedH3s(next);
-          if (next.length === 0) {
-            setPoints([]);
-            setPoles([]);
-            setShowModal(false);
-            return;
-          }
-
-          const fetchPointsFor = async (hex: string) => {
-            const res = await fetch(`/api/h3/${hex}/points`);
-        const json = await res.json();
-        const rawPoints = (json.points || []);
-        const pts = rawPoints.map((p: any) => {
-          const clsRaw = p.classification ?? p.CLASSIFICATION ?? p.Classification;
-          const cls = clsRaw !== undefined && clsRaw !== null ? Number(clsRaw) : undefined;
-              const isEnc = Boolean(
-                p.is_encroaching ?? p.IS_ENCROACHING ??
-                p.is_encoraching ?? p.IS_ENCORACHING ??
-                p.is_encroachment ?? p.IS_ENCROACHMENT
-              );
-          return {
-            x: Number(p.x ?? p.X ?? p.longitude ?? p.lon),
-            y: Number(p.y ?? p.Y ?? p.latitude ?? p.lat),
-            z: Number(p.z ?? p.Z ?? p.height ?? p.elevation),
-                classification: Number.isFinite(cls as number) ? (cls as number) : undefined,
-                lat: Number(p.lat ?? p.latitude),
-                lng: Number(p.lng ?? p.longitude ?? p.lon),
-                is_encroaching: isEnc
-              } as LidarPoint;
-            }).filter((p: any) => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
-            return pts;
-          };
-
-          const fetchPolesFor = async (hex: string) => {
-            const res = await fetch(`/api/h3/${hex}/poles`);
-            const json = await res.json();
-            const rawPoles = (json.poles || []);
-            const mapped: Pole[] = rawPoles.map((r: any) => ({
-              pole_id: String(r.pole_id ?? r.POLE_ID ?? r.id ?? ''),
-              lat: Number(r.lat ?? r.latitude),
-              lng: Number(r.lng ?? r.longitude ?? r.lon),
-              height_m: Number(r.height_m ?? r.height ?? r.h),
-              connects_to: String(r.connects_to ?? r.CONNECTS_TO ?? ''),
-              line_sag: r.line_sag !== undefined ? Number(r.line_sag) : undefined
-            })).filter((p: Pole) => Number.isFinite(p.lat) && Number.isFinite(p.lng) && Number.isFinite(p.height_m));
-            return mapped;
-          };
-
-          const [pointsArrays, polesArrays] = await Promise.all([
-            Promise.all(next.map(hex => fetchPointsFor(hex))),
-            Promise.all(next.map(hex => fetchPolesFor(hex)))
-          ]);
-
-          const mergedPoints = pointsArrays.flat();
-          const mergedPolesMap: Record<string, Pole> = {};
-          for (const arr of polesArrays) {
-            for (const p of arr) {
-              mergedPolesMap[p.pole_id] = p;
+          setSelectedH3s((prev) => {
+            const next = new Set(prev);
+            if (next.has(h3Hex)) {
+              next.delete(h3Hex);
+            } else {
+              next.add(h3Hex);
             }
-          }
-          setPoints(mergedPoints);
-          setPoles(Object.values(mergedPolesMap));
-          // Hide hover details when opening the point cloud modal
-          if (hoverTimerRef.current !== null) { window.clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
-          setHoverVisible(false);
-          setHoverHex(null);
-          setShowWoMenu(false);
-        setShowModal(true);
+            return next;
+          });
       }
-      })();
     }
-  }), [h3, selectedH3s, showEncroachment, showFireRisk, encroachingH3, fireRiskMap, fireRiskRange.min, fireRiskRange.max, hoverHex, pulse]);
+  }), [h3, selectedH3s, showEncroachment, showFireRisk, encroachingH3, fireRiskMap, fireRiskRange.min, fireRiskRange.max, hoverHex, pulse, showWoMenu]);
 
   const vegIconLayer = useMemo(() => {
     if (!showVegIcons) return null as any;
@@ -562,6 +511,79 @@ export default function App() {
     pointSize: 2
   }), [centered]);
 
+  const renderSelectedCells = async () => {
+    if (!selectedH3List.length || rendering3d) return;
+    try {
+      setRendering3d(true);
+      setRenderError(null);
+      const res = await fetch('/api/h3/batch/points', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ h3Indices: selectedH3List })
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json?.error || 'Failed to render selected cells');
+      }
+
+      const rawPoints = json.points || [];
+      const mappedPoints: LidarPoint[] = rawPoints
+        .map((p: any) => {
+          const clsRaw = p.classification ?? p.CLASSIFICATION ?? p.Classification;
+          const cls = clsRaw !== undefined && clsRaw !== null ? Number(clsRaw) : undefined;
+          const isEnc = Boolean(
+            p.is_encroaching ?? p.IS_ENCROACHING ??
+            p.is_encoraching ?? p.IS_ENCORACHING ??
+            p.is_encroachment ?? p.IS_ENCROACHMENT
+          );
+          return {
+            x: Number(p.x ?? p.X ?? p.longitude ?? p.lon),
+            y: Number(p.y ?? p.Y ?? p.latitude ?? p.lat),
+            z: Number(p.z ?? p.Z ?? p.height ?? p.elevation),
+            classification: Number.isFinite(cls as number) ? (cls as number) : undefined,
+            lat: Number(p.lat ?? p.latitude),
+            lng: Number(p.lng ?? p.longitude ?? p.lon),
+            is_encroaching: isEnc
+          } as LidarPoint;
+        })
+        .filter((p: LidarPoint) => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
+
+      const rawAssets = json.assets || json.poles || [];
+      const mappedPoles: Pole[] = rawAssets
+        .map((r: any) => ({
+          pole_id: String(r.pole_id ?? r.POLE_ID ?? r.asset_id ?? r.id ?? ''),
+          lat: Number(r.lat ?? r.latitude),
+          lng: Number(r.lng ?? r.longitude ?? r.lon),
+          height_m: Number(r.height_m ?? r.height ?? r.h),
+          connects_to: String(r.connects_to ?? r.CONNECTS_TO ?? ''),
+          line_sag: r.line_sag !== undefined ? Number(r.line_sag) : undefined
+        }))
+        .filter((p: Pole) => p.pole_id && Number.isFinite(p.lat) && Number.isFinite(p.lng) && Number.isFinite(p.height_m));
+
+      const dedupedPoles = Object.values(
+        mappedPoles.reduce((acc, pole) => {
+          acc[pole.pole_id] = pole;
+          return acc;
+        }, {} as Record<string, Pole>)
+      );
+
+      setPoints(mappedPoints);
+      setPoles(dedupedPoles);
+      if (hoverTimerRef.current !== null) {
+        window.clearTimeout(hoverTimerRef.current);
+        hoverTimerRef.current = null;
+      }
+      setHoverVisible(false);
+      setHoverHex(null);
+      setShowWoMenu(false);
+      setShowModal(true);
+    } catch (err: any) {
+      setRenderError(err?.message || 'Failed to render selected cells');
+    } finally {
+      setRendering3d(false);
+    }
+  };
+
   return (
     <div style={{ height: '100%', width: '100%' }} onContextMenu={(e) => e.preventDefault()}>
       <style>{`@keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }`}</style>
@@ -580,6 +602,47 @@ export default function App() {
           </MapGL>
         )}
       </DeckGL>
+
+      {selectedH3List.length > 0 && (
+        <div style={{
+          position: 'absolute',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          bottom: 22,
+          zIndex: 4,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          background: 'rgba(15, 23, 42, 0.92)',
+          color: '#e2e8f0',
+          border: '1px solid rgba(148, 163, 184, 0.35)',
+          borderRadius: 10,
+          padding: '10px 12px'
+        }}>
+          <span style={{ fontSize: 13 }}>{selectedH3List.length} cell{selectedH3List.length === 1 ? '' : 's'} selected</span>
+          <button
+            onClick={() => { void renderSelectedCells(); }}
+            disabled={rendering3d}
+            style={{ border: 'none', borderRadius: 6, background: '#2563eb', color: 'white', padding: '6px 10px', cursor: rendering3d ? 'not-allowed' : 'pointer' }}
+          >
+            {rendering3d ? 'Rendering...' : 'Render 3D'}
+          </button>
+          <button
+            onClick={() => {
+              setSelectedH3s(new Set());
+              setRenderError(null);
+            }}
+            style={{ borderRadius: 6, border: '1px solid #64748b', background: 'transparent', color: '#e2e8f0', padding: '6px 10px', cursor: 'pointer' }}
+          >
+            Clear Selection
+          </button>
+        </div>
+      )}
+      {renderError && (
+        <div style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)', bottom: 76, zIndex: 4, background: 'rgba(127,29,29,0.95)', color: '#fecaca', borderRadius: 8, padding: '8px 10px', fontSize: 12 }}>
+          {renderError}
+        </div>
+      )}
 
       <div style={{ position: 'absolute', top: 10, right: 10, zIndex: 2, background: 'rgba(31,42,60,0.9)', color: '#e6eef7', padding: 8, borderRadius: 4, display: 'flex', gap: 10, alignItems: 'center' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -609,7 +672,7 @@ export default function App() {
           display: 'flex', flexDirection: 'column'
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'relative', zIndex: 2, padding: 8, color: '#e6eef7' }}>
-            <h3 style={{ margin: 0 }}>H3 {selectedH3s.join(', ')}</h3>
+            <h3 style={{ margin: 0 }}>H3 {selectedH3List.join(', ')}</h3>
             <button onClick={() => setShowModal(false)}>Close</button>
           </div>
           <div style={{ position: 'relative', zIndex: 1, flex: '1 1 auto' }}>

@@ -81,6 +81,47 @@ function isHex(str) {
   return /^[0-9a-fA-F]+$/.test(str);
 }
 
+router.post('/h3/batch/points', async (req, res) => {
+  const db = req.db;
+  const indices = Array.isArray(req.body?.h3Indices) ? req.body.h3Indices : [];
+  const normalized = Array.from(
+    new Set(
+      indices
+        .map((v) => String(v || '').trim().toLowerCase())
+        .filter((v) => isHex(v))
+    )
+  );
+
+  if (!normalized.length) {
+    return res.status(400).json({ error: 'Body must include non-empty h3Indices array of valid hex values' });
+  }
+
+  const inClause = normalized.map((h) => `'${h}'`).join(', ');
+  const pointsSql = `
+SELECT x, y, z, classification, lat, lng, case when is_encroaching is null then false else is_encroaching end as is_encroaching
+FROM ${catalog}.gold_lidar.dense_encroachment
+WHERE h3_10 IN (${inClause})
+`;
+  const assetsSql = `
+SELECT pole_id, lat, lng, height_m, connects_to, line_sag, h3_10
+FROM ${catalog}.bronze_lidar.line_topology
+WHERE h3_10 IN (${inClause})
+`;
+
+  try {
+    const [points, poleAssets] = await Promise.all([db.query(pointsSql), db.query(assetsSql)]);
+    const assets = poleAssets.map((a) => ({
+      ...a,
+      asset_id: a.pole_id,
+      asset_type: 'POLE'
+    }));
+    // Keep "poles" for compatibility while introducing generic "assets".
+    res.json({ h3Indices: normalized, points, assets, poles: poleAssets });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/h3/:h3Hex/points', async (req, res) => {
   const db = req.db;
   const h3Hex = String(req.params.h3Hex || '').trim();
