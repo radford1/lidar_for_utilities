@@ -6,11 +6,13 @@ import DeckGL from '@deck.gl/react';
 import { OrbitView, COORDINATE_SYSTEM } from '@deck.gl/core';
 import { H3HexagonLayer } from '@deck.gl/geo-layers';
 import { LineLayer, PathLayer, PointCloudLayer, ScatterplotLayer } from '@deck.gl/layers';
+import PoleInfoPanel from './components/PoleInfoPanel';
 
 type LidarPoint = { x: number; y: number; z: number; classification?: number; lat?: number; lng?: number; is_encroaching?: boolean };
 type Pole = { pole_id: string; lat: number; lng: number; height_m: number; connects_to?: string; line_sag?: number };
 type Segment = { source: [number, number, number]; target: [number, number, number] };
 type Conductor = { path: [number, number, number][], color: [number, number, number, number] };
+type PoleSegment = { pole_id: string; source: [number, number, number]; target: [number, number, number] };
 
 export default function App() {
   const [mapboxToken, setMapboxToken] = useState<string | null>(null);
@@ -42,6 +44,7 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
   const [chatConversationId, setChatConversationId] = useState<string | null>(null);
+  const [selectedPoleId, setSelectedPoleId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -310,69 +313,9 @@ export default function App() {
     return R * c;
   }
 
-  const poleSegments = useMemo(() => {
-    if (!poles.length || !points.length) return [] as Segment[];
-    const groundPoints = points.filter(p => p.classification === 2);
-
-    const median = (arr: number[]) => {
-      if (!arr.length) return undefined;
-      const s = [...arr].sort((a,b)=>a-b);
-      const mid = Math.floor(s.length / 2);
-      return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-    };
-
-    const groundZMedian = median(groundPoints.map(p => p.z));
-    const minZ = points.reduce((m, p) => Math.min(m, p.z), Number.POSITIVE_INFINITY);
-
-    const nearestPointIdx = (lat: number, lng: number, withinMeters?: number) => {
-      let bestIdx = -1;
-      let bestDist = Number.POSITIVE_INFINITY;
-      for (let i = 0; i < points.length; i++) {
-        const d = haversineMeters(lat, lng, points[i].lat, points[i].lng);
-        if (d < bestDist) {
-          bestDist = d;
-          bestIdx = i;
-        }
-      }
-      if (withinMeters !== undefined && bestDist > withinMeters) return -1;
-      return bestIdx;
-    };
-
-    const nearestGroundZ = (lat: number, lng: number) => {
-      let bestZ: number | undefined = undefined;
-      let bestDist = 50.0001; // meters
-      for (let i = 0; i < groundPoints.length; i++) {
-        const gp = groundPoints[i];
-        const d = haversineMeters(lat, lng, gp.lat, gp.lng);
-        if (d < bestDist) {
-          bestDist = d;
-          bestZ = gp.z;
-        }
-      }
-      if (bestZ !== undefined) return bestZ;
-      if (groundZMedian !== undefined) return groundZMedian;
-      if (Number.isFinite(minZ)) return minZ;
-      return 0;
-    };
-
-    const segments: Segment[] = [];
-    for (const pole of poles) {
-      const idx = nearestPointIdx(pole.lat, pole.lng);
-      if (idx === -1) continue;
-      const baseX = points[idx].x;
-      const baseY = points[idx].y;
-      const baseZ = nearestGroundZ(pole.lat, pole.lng);
-      const topZ = baseZ + pole.height_m;
-      const src: [number, number, number] = [baseX - centered.centroid[0], baseY - centered.centroid[1], baseZ - centered.centroid[2]];
-      const tgt: [number, number, number] = [baseX - centered.centroid[0], baseY - centered.centroid[1], topZ - centered.centroid[2]];
-      segments.push({ source: src, target: tgt });
-    }
-
-    return segments;
-  }, [poles, points, centered.centroid]);
-
+  // Compute pole positions (base and top) for 3D rendering — combines old poleSegments + poleTops
   const poleTops = useMemo(() => {
-    if (!poles.length || !points.length) return {} as Record<string, { centered: [number, number, number]; lat: number; lng: number; line_sag?: number }>;
+    if (!poles.length || !points.length) return {} as Record<string, { centered: [number, number, number]; base: [number, number, number]; lat: number; lng: number; line_sag?: number; height_m: number }>;
     const groundPoints = points.filter(p => p.classification === 2);
 
     const median = (arr: number[]) => {
@@ -400,7 +343,7 @@ export default function App() {
 
     const nearestGroundZ = (lat: number, lng: number) => {
       let bestZ: number | undefined = undefined;
-      let bestDist = 50.0001; // meters
+      let bestDist = 50.0001;
       for (let i = 0; i < groundPoints.length; i++) {
         const gp = groundPoints[i];
         const d = haversineMeters(lat, lng, gp.lat, gp.lng);
@@ -415,7 +358,7 @@ export default function App() {
       return 0;
     };
 
-    const map: Record<string, { centered: [number, number, number]; lat: number; lng: number; line_sag?: number }> = {};
+    const map: Record<string, { centered: [number, number, number]; base: [number, number, number]; lat: number; lng: number; line_sag?: number; height_m: number }> = {};
     for (const pole of poles) {
       const idx = nearestPointIdx(pole.lat, pole.lng);
       if (idx === -1) continue;
@@ -423,12 +366,62 @@ export default function App() {
       const topZ = baseZ + pole.height_m;
       const cx = points[idx].x - centered.centroid[0];
       const cy = points[idx].y - centered.centroid[1];
-      const cz = topZ - centered.centroid[2];
-      map[pole.pole_id] = { centered: [cx, cy, cz], lat: pole.lat, lng: pole.lng, line_sag: pole.line_sag };
+      const czBase = baseZ - centered.centroid[2];
+      const czTop = topZ - centered.centroid[2];
+      map[pole.pole_id] = { centered: [cx, cy, czTop], base: [cx, cy, czBase], lat: pole.lat, lng: pole.lng, line_sag: pole.line_sag, height_m: pole.height_m };
     }
     return map;
   }, [poles, points, centered.centroid]);
 
+  // Data for pole LineLayer — vertical segments from base to top, with pole_id for picking
+  const poleSegmentsData = useMemo<PoleSegment[]>(() => {
+    return Object.entries(poleTops).map(([pole_id, data]) => ({
+      pole_id,
+      source: data.base as [number, number, number],
+      target: data.centered as [number, number, number],
+    }));
+  }, [poleTops]);
+
+  // Crossarm segments — horizontal beams near the top of each pole, perpendicular to conductor direction
+  const crossarmSegments = useMemo<Segment[]>(() => {
+    if (!poles.length || !Object.keys(poleTops).length) return [];
+    const segments: Segment[] = [];
+
+    for (const pole of poles) {
+      const top = poleTops[pole.pole_id];
+      if (!top) continue;
+
+      // Determine conductor direction from this pole to find crossarm perpendicular
+      let dx = 1, dy = 0;
+      if (pole.connects_to) {
+        const targets = String(pole.connects_to).split(',').map(s => s.trim()).filter(Boolean);
+        for (const t of targets) {
+          if (poleTops[t]) {
+            const other = poleTops[t];
+            dx = other.centered[0] - top.centered[0];
+            dy = other.centered[1] - top.centered[1];
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len > 0) { dx /= len; dy /= len; }
+            break;
+          }
+        }
+      }
+
+      // Crossarm perpendicular to conductor direction
+      const perpX = -dy;
+      const perpY = dx;
+      const armHalf = 1.25; // half-length of crossarm (2.5m total)
+      const crossZ = top.centered[2] - 0.5; // just below pole top
+
+      segments.push({
+        source: [top.centered[0] - perpX * armHalf, top.centered[1] - perpY * armHalf, crossZ],
+        target: [top.centered[0] + perpX * armHalf, top.centered[1] + perpY * armHalf, crossZ],
+      });
+    }
+    return segments;
+  }, [poles, poleTops]);
+
+  // Three-phase conductor catenary curves — 3 parallel wires per span
   const conductors = useMemo(() => {
     const edges = new Set<string>();
     const paths: Conductor[] = [];
@@ -436,6 +429,13 @@ export default function App() {
     if (!ids.length) return paths;
 
     const idToPole: Record<string, Pole> = Object.fromEntries(poles.map((p) => [p.pole_id, p] as [string, Pole]));
+
+    const phaseColors: [number, number, number, number][] = [
+      [190, 190, 200, 255], // Phase A — silver
+      [200, 200, 210, 255], // Phase B — lighter silver
+      [175, 175, 185, 255], // Phase C — darker silver
+    ];
+    const conductorOffsets = [-0.6, 0, 0.6]; // lateral offset in meters per phase
 
     for (const pole of poles) {
       if (!pole.connects_to) continue;
@@ -460,20 +460,38 @@ export default function App() {
         const sagB = poleB?.line_sag;
         const sagMeters = Number.isFinite(sagA as number) && Number.isFinite(sagB as number)
           ? ((sagA as number) + (sagB as number)) / 2
-          : dist * 0.02; // 2% of span as fallback
+          : dist * 0.02;
+
+        // Perpendicular direction for lateral conductor offset (in xy plane)
+        const spanDx = B.centered[0] - A.centered[0];
+        const spanDy = B.centered[1] - A.centered[1];
+        const spanLen = Math.sqrt(spanDx * spanDx + spanDy * spanDy);
+        const perpX = spanLen > 0 ? -spanDy / spanLen : 0;
+        const perpY = spanLen > 0 ? spanDx / spanLen : 1;
+
+        // Attachment height is at the crossarm level (0.5m below pole top)
+        const aZ = A.centered[2] - 0.5;
+        const bZ = B.centered[2] - 0.5;
 
         const N = 32;
-        const path: [number, number, number][] = [];
-        for (let i = 0; i <= N; i++) {
-          const tNorm = i / N;
-          const x = A.centered[0] * (1 - tNorm) + B.centered[0] * tNorm;
-          const y = A.centered[1] * (1 - tNorm) + B.centered[1] * tNorm;
-          const zLinear = A.centered[2] * (1 - tNorm) + B.centered[2] * tNorm;
-          const zSag = sagMeters * 4 * tNorm * (1 - tNorm);
-          const z = zLinear - zSag;
-          path.push([x, y, z]);
+
+        for (let phase = 0; phase < 3; phase++) {
+          const offset = conductorOffsets[phase];
+          const ox = perpX * offset;
+          const oy = perpY * offset;
+
+          const path: [number, number, number][] = [];
+          for (let i = 0; i <= N; i++) {
+            const tNorm = i / N;
+            const x = A.centered[0] * (1 - tNorm) + B.centered[0] * tNorm + ox;
+            const y = A.centered[1] * (1 - tNorm) + B.centered[1] * tNorm + oy;
+            const zLinear = aZ * (1 - tNorm) + bZ * tNorm;
+            const zSag = sagMeters * 4 * tNorm * (1 - tNorm);
+            const z = zLinear - zSag;
+            path.push([x, y, z]);
+          }
+          paths.push({ path, color: phaseColors[phase] });
         }
-        paths.push({ path, color: [230, 230, 230, 255] });
       }
     }
 
@@ -673,7 +691,7 @@ export default function App() {
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'relative', zIndex: 2, padding: 8, color: '#e6eef7' }}>
             <h3 style={{ margin: 0 }}>H3 {selectedH3List.join(', ')}</h3>
-            <button onClick={() => setShowModal(false)}>Close</button>
+            <button onClick={() => { setShowModal(false); setSelectedPoleId(null); }}>Close</button>
           </div>
           <div style={{ position: 'relative', zIndex: 1, flex: '1 1 auto' }}>
             <DeckGL
@@ -686,23 +704,44 @@ export default function App() {
                 rotationOrbit: 30
               } as unknown as any}
               controller={true}
-              layers={centered.data.length ? [pointCloudLayer, new LineLayer<Segment>({
-                id: 'poles',
-                data: poleSegments,
-                coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-                getSourcePosition: (d: Segment) => d.source,
-                getTargetPosition: (d: Segment) => d.target,
-                getColor: [255, 220, 0, 255] as [number, number, number, number],
-                widthMinPixels: 3
-              }), new PathLayer<Conductor>({
-                id: 'conductors',
-                data: conductors,
-                coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
-                getPath: (d: Conductor) => d.path,
-                getColor: (d: Conductor) => d.color,
-                widthMinPixels: 2,
-                rounded: true
-              })] : []}
+              layers={centered.data.length ? [pointCloudLayer,
+                // Wooden poles — vertical brown lines, clickable
+                new LineLayer<PoleSegment>({
+                  id: 'poles',
+                  data: poleSegmentsData,
+                  coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+                  getSourcePosition: (d: PoleSegment) => d.source,
+                  getTargetPosition: (d: PoleSegment) => d.target,
+                  getColor: [139, 90, 43, 255] as [number, number, number, number],
+                  widthMinPixels: 6,
+                  pickable: true,
+                  onClick: (info: any) => {
+                    if (info.object) {
+                      setSelectedPoleId((info.object as PoleSegment).pole_id);
+                    }
+                  },
+                }),
+                // Crossarms — horizontal brown beams near pole tops
+                new LineLayer<Segment>({
+                  id: 'crossarms',
+                  data: crossarmSegments,
+                  coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+                  getSourcePosition: (d: Segment) => d.source,
+                  getTargetPosition: (d: Segment) => d.target,
+                  getColor: [101, 67, 33, 255] as [number, number, number, number],
+                  widthMinPixels: 4,
+                }),
+                // Three-phase conductors
+                new PathLayer<Conductor>({
+                  id: 'conductors',
+                  data: conductors,
+                  coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+                  getPath: (d: Conductor) => d.path,
+                  getColor: (d: Conductor) => d.color,
+                  widthMinPixels: 1,
+                  rounded: true,
+                }),
+              ] : []}
             />
             {!centered.data.length && (
               <div style={{ position: 'absolute', inset: '0', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666' }}>
@@ -756,6 +795,12 @@ export default function App() {
                 </div>
               );
             })()}
+            {/* Pole Info Panel — slides in from right when a pole is clicked */}
+            {selectedPoleId && (
+              <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: 360, zIndex: 3 }}>
+                <PoleInfoPanel poleId={selectedPoleId} onClose={() => setSelectedPoleId(null)} />
+              </div>
+            )}
           </div>
         </div>
       )}
