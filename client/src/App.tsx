@@ -7,6 +7,7 @@ import { OrbitView, COORDINATE_SYSTEM } from '@deck.gl/core';
 import { H3HexagonLayer } from '@deck.gl/geo-layers';
 import { LineLayer, PathLayer, PointCloudLayer, ScatterplotLayer } from '@deck.gl/layers';
 import PoleInfoPanel from './components/PoleInfoPanel';
+import { generateRadarFrames, type RadarCell } from './utils/weatherRadar';
 
 type LidarPoint = { x: number; y: number; z: number; classification?: number; lat?: number; lng?: number; is_encroaching?: boolean };
 type Pole = { pole_id: string; lat: number; lng: number; height_m: number; connects_to?: string; line_sag?: number };
@@ -45,6 +46,11 @@ export default function App() {
   const [chatSending, setChatSending] = useState(false);
   const [chatConversationId, setChatConversationId] = useState<string | null>(null);
   const [selectedPoleId, setSelectedPoleId] = useState<string | null>(null);
+
+  // Weather radar state
+  const [showRadar, setShowRadar] = useState(false);
+  const [radarPlaying, setRadarPlaying] = useState(false);
+  const [radarFrame, setRadarFrame] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -285,6 +291,45 @@ export default function App() {
       pickable: false
     });
   }, [showVegIcons, vegIndexMap, centroidMap]);
+
+  // --- Weather radar frames (generated once) ---
+  const radarFrames = useMemo(() => generateRadarFrames(38.460, -121.180, 24), []);
+
+  // Auto-play when radar is toggled on
+  useEffect(() => {
+    if (showRadar) {
+      setRadarPlaying(true);
+      setRadarFrame(0);
+    } else {
+      setRadarPlaying(false);
+    }
+  }, [showRadar]);
+
+  // Advance frames — pauses briefly on last frame before looping
+  useEffect(() => {
+    if (!showRadar || !radarPlaying) return;
+    const isLast = radarFrame === radarFrames.length - 1;
+    const delay = isLast ? 1400 : 500;
+    const timeout = setTimeout(() => {
+      setRadarFrame((f) => (f + 1) % radarFrames.length);
+    }, delay);
+    return () => clearTimeout(timeout);
+  }, [showRadar, radarPlaying, radarFrame, radarFrames.length]);
+
+  // Radar ScatterplotLayer
+  const radarLayer = useMemo(() => {
+    if (!showRadar) return null as any;
+    return new ScatterplotLayer<RadarCell>({
+      id: 'weather-radar',
+      data: radarFrames[radarFrame] || [],
+      getPosition: (d: RadarCell) => d.position,
+      getFillColor: (d: RadarCell) => d.color,
+      getRadius: 450,
+      radiusUnits: 'meters' as const,
+      radiusMinPixels: 2,
+      pickable: false,
+    });
+  }, [showRadar, radarFrame, radarFrames]);
 
   const centered = useMemo(() => {
     if (!points || points.length === 0) return { data: [], centroid: [0, 0, 0] as [number, number, number] };
@@ -610,7 +655,7 @@ export default function App() {
       <DeckGL
         initialViewState={viewState}
         controller={true}
-        layers={[h3Layer, vegIconLayer].filter(Boolean) as any}
+        layers={[h3Layer, vegIconLayer, radarLayer].filter(Boolean) as any}
       >
         {!!mapboxToken && (
           <MapGL
@@ -678,8 +723,80 @@ export default function App() {
           <input type="checkbox" checked={showVegIcons} onChange={e => setShowVegIcons(e.target.checked)} />
           Veg Index
         </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" checked={showRadar} onChange={e => setShowRadar(e.target.checked)} />
+          Radar
+        </label>
         {/* Chat FAB bottom-right */}
       </div>
+      {/* Weather radar playback controls */}
+      {showRadar && (
+        <div style={{
+          position: 'absolute',
+          left: 16,
+          bottom: 62,
+          zIndex: 4,
+          background: 'rgba(15, 23, 42, 0.94)',
+          borderRadius: 10,
+          padding: '8px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          color: '#e2e8f0',
+          border: '1px solid rgba(148, 163, 184, 0.35)',
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        }}>
+          <button
+            onClick={() => setRadarPlaying(p => !p)}
+            style={{
+              background: 'transparent',
+              border: '1px solid rgba(148,163,184,0.4)',
+              color: '#e2e8f0',
+              borderRadius: 6,
+              width: 30,
+              height: 30,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 14,
+            }}
+            title={radarPlaying ? 'Pause' : 'Play'}
+          >
+            {radarPlaying ? '⏸' : '▶'}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={radarFrames.length - 1}
+            value={radarFrame}
+            onChange={e => {
+              setRadarFrame(Number(e.target.value));
+              setRadarPlaying(false);
+            }}
+            style={{ width: 130, accentColor: '#3b82f6', cursor: 'pointer' }}
+          />
+          <span style={{ fontSize: 11, opacity: 0.8, minWidth: 52, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+            {radarFrame === radarFrames.length - 1
+              ? 'Now'
+              : `-${(radarFrames.length - 1 - radarFrame) * 5} min`}
+          </span>
+          {/* Radar legend */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginLeft: 6 }}>
+            {[
+              { c: '#00c800', l: 'Light' },
+              { c: '#ffc800', l: 'Mod' },
+              { c: '#ff4600', l: 'Heavy' },
+              { c: '#c80000', l: 'Severe' },
+              { c: '#ff00ff', l: 'Extreme' },
+            ].map(({ c, l }) => (
+              <div key={l} title={l} style={{ width: 14, height: 10, background: c, borderRadius: 1 }} />
+            ))}
+            <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 3 }}>dBZ</span>
+          </div>
+        </div>
+      )}
+
       <button onClick={() => setShowChat(s => !s)} title="Chat"
         style={{ position: 'absolute', right: 16, bottom: 16, zIndex: 3, width: 56, height: 56, borderRadius: 28, border: 'none', background: '#2563eb', color: 'white', boxShadow: '0 8px 20px rgba(0,0,0,0.25)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <span style={{ fontSize: 22 }}>💬</span>
