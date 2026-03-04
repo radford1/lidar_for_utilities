@@ -410,7 +410,7 @@ export default function App() {
       // Crossarm perpendicular to conductor direction
       const perpX = -dy;
       const perpY = dx;
-      const armHalf = 1.25; // half-length of crossarm (2.5m total)
+      const armHalf = 1.2; // half-length of crossarm — extends past outer conductor positions
       const crossZ = top.centered[2] - 0.5; // just below pole top
 
       segments.push({
@@ -431,11 +431,11 @@ export default function App() {
     const idToPole: Record<string, Pole> = Object.fromEntries(poles.map((p) => [p.pole_id, p] as [string, Pole]));
 
     const phaseColors: [number, number, number, number][] = [
-      [190, 190, 200, 255], // Phase A — silver
-      [200, 200, 210, 255], // Phase B — lighter silver
-      [175, 175, 185, 255], // Phase C — darker silver
+      [40, 40, 40, 255],    // Phase A — dark charcoal
+      [70, 70, 70, 255],    // Phase B — medium dark gray
+      [50, 50, 50, 255],    // Phase C — near-black
     ];
-    const conductorOffsets = [-0.6, 0, 0.6]; // lateral offset in meters per phase
+    const conductorOffsets = [-0.9, 0, 0.9]; // lateral offset in meters per phase
 
     for (const pole of poles) {
       if (!pole.connects_to) continue;
@@ -479,6 +479,8 @@ export default function App() {
           const offset = conductorOffsets[phase];
           const ox = perpX * offset;
           const oy = perpY * offset;
+          // Slight sag variation per phase so they don't overlap perfectly
+          const phaseSag = sagMeters * (1 + (phase - 1) * 0.08);
 
           const path: [number, number, number][] = [];
           for (let i = 0; i <= N; i++) {
@@ -486,7 +488,7 @@ export default function App() {
             const x = A.centered[0] * (1 - tNorm) + B.centered[0] * tNorm + ox;
             const y = A.centered[1] * (1 - tNorm) + B.centered[1] * tNorm + oy;
             const zLinear = aZ * (1 - tNorm) + bZ * tNorm;
-            const zSag = sagMeters * 4 * tNorm * (1 - tNorm);
+            const zSag = phaseSag * 4 * tNorm * (1 - tNorm);
             const z = zLinear - zSag;
             path.push([x, y, z]);
           }
@@ -731,7 +733,7 @@ export default function App() {
                   getColor: [101, 67, 33, 255] as [number, number, number, number],
                   widthMinPixels: 4,
                 }),
-                // Three-phase conductors
+                // Three-phase conductors — thin dark wires
                 new PathLayer<Conductor>({
                   id: 'conductors',
                   data: conductors,
@@ -739,6 +741,7 @@ export default function App() {
                   getPath: (d: Conductor) => d.path,
                   getColor: (d: Conductor) => d.color,
                   widthMinPixels: 1,
+                  widthMaxPixels: 1,
                   rounded: true,
                 }),
               ] : []}
