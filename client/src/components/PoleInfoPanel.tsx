@@ -40,6 +40,12 @@ interface WorkOrder {
   estimated_hours: number;
 }
 
+interface ForecastPoint {
+  timestamp: string;
+  offset_minutes: number;
+  mw: number;
+}
+
 interface Props {
   poleId: string;
   onClose: () => void;
@@ -129,7 +135,8 @@ export default function PoleInfoPanel({ poleId, onClose }: Props) {
   const [attributes, setAttributes] = useState<PoleAttributes | null>(null);
   const [weatherEvents, setWeatherEvents] = useState<WeatherEvent[] | null>(null);
   const [workOrders, setWorkOrders] = useState<WorkOrder[] | null>(null);
-  const [activeTab, setActiveTab] = useState<'info' | 'weather' | 'workorders'>('info');
+  const [loadForecast, setLoadForecast] = useState<ForecastPoint[] | null>(null);
+  const [activeTab, setActiveTab] = useState<'info' | 'weather' | 'workorders' | 'forecast'>('info');
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailLoaded, setDetailLoaded] = useState(false);
@@ -140,6 +147,7 @@ export default function PoleInfoPanel({ poleId, onClose }: Props) {
     setAttributes(null);
     setWeatherEvents(null);
     setWorkOrders(null);
+    setLoadForecast(null);
     setActiveTab('info');
     setDetailLoaded(false);
 
@@ -158,12 +166,14 @@ export default function PoleInfoPanel({ poleId, onClose }: Props) {
     Promise.all([
       fetch(`/api/assets/${encodeURIComponent(poleId)}/weather-stress`).then((r) => r.json()),
       fetch(`/api/assets/${encodeURIComponent(poleId)}/work-orders`).then((r) => r.json()),
+      fetch(`/api/assets/${encodeURIComponent(poleId)}/load-forecast`).then((r) => r.json()),
     ])
-      .then(([weather, orders]) => {
+      .then(([weather, orders, forecast]) => {
         setWeatherEvents(weather.events || []);
         setWorkOrders(orders.work_orders || []);
+        setLoadForecast(forecast.forecast || []);
         setDetailLoaded(true);
-        setActiveTab('weather');
+        setActiveTab('forecast');
       })
       .catch(() => {})
       .finally(() => setDetailLoading(false));
@@ -268,6 +278,9 @@ export default function PoleInfoPanel({ poleId, onClose }: Props) {
         <div style={tabBar}>
           <button style={tabBtn(activeTab === 'info')} onClick={() => setActiveTab('info')}>
             Info
+          </button>
+          <button style={tabBtn(activeTab === 'forecast')} onClick={() => setActiveTab('forecast')}>
+            Forecast
           </button>
           <button style={tabBtn(activeTab === 'weather')} onClick={() => setActiveTab('weather')}>
             Weather
@@ -471,6 +484,205 @@ export default function PoleInfoPanel({ poleId, onClose }: Props) {
                   </div>
                 </div>
               ))}
+            </>
+          )}
+
+          {/* ---- LOAD FORECAST TAB ---- */}
+          {activeTab === 'forecast' && loadForecast && (
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 6, fontSize: 14 }}>
+                Load Forecast — Next 8 Hours
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.6, marginBottom: 12 }}>
+                Total MW delivered through this pole's feeder segment
+              </div>
+
+              {(() => {
+                const pts = loadForecast;
+                if (!pts.length) return <div style={{ opacity: 0.5, fontSize: 12 }}>No forecast data.</div>;
+
+                const mwValues = pts.map((p) => p.mw);
+                const minMW = Math.min(...mwValues);
+                const maxMW = Math.max(...mwValues);
+                const rangeMW = maxMW - minMW || 1;
+                const avgMW = mwValues.reduce((s, v) => s + v, 0) / mwValues.length;
+                const peakMW = maxMW;
+                const peakIdx = mwValues.indexOf(peakMW);
+
+                // Chart dimensions
+                const W = 310;
+                const H = 160;
+                const padL = 40;
+                const padR = 10;
+                const padT = 10;
+                const padB = 28;
+                const cw = W - padL - padR;
+                const ch = H - padT - padB;
+
+                // Scale with 5% breathing room
+                const yMin = minMW - rangeMW * 0.05;
+                const yMax = maxMW + rangeMW * 0.05;
+                const yRange = yMax - yMin;
+
+                const toX = (i: number) => padL + (i / (pts.length - 1)) * cw;
+                const toY = (mw: number) => padT + ch - ((mw - yMin) / yRange) * ch;
+
+                // Build SVG polyline points
+                const linePoints = pts.map((p, i) => `${toX(i)},${toY(p.mw)}`).join(' ');
+                // Area fill (close polygon along bottom)
+                const areaPath =
+                  `M${toX(0)},${toY(pts[0].mw)} ` +
+                  pts.map((p, i) => `L${toX(i)},${toY(p.mw)}`).join(' ') +
+                  ` L${toX(pts.length - 1)},${padT + ch} L${toX(0)},${padT + ch} Z`;
+
+                // Y-axis tick values (4 ticks)
+                const yTicks: number[] = [];
+                for (let t = 0; t <= 3; t++) {
+                  yTicks.push(yMin + (yRange * t) / 3);
+                }
+
+                // X-axis labels — show hours from now: 0h, 2h, 4h, 6h, 8h
+                const xLabels = [0, 2, 4, 6, 8].map((h) => ({
+                  label: `+${h}h`,
+                  x: toX((h / 8) * (pts.length - 1)),
+                }));
+
+                // Format time for tooltip-style info
+                const formatTime = (iso: string) => {
+                  const d = new Date(iso);
+                  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+                };
+
+                return (
+                  <div>
+                    <svg width={W} height={H} style={{ display: 'block', margin: '0 auto' }}>
+                      {/* Grid lines */}
+                      {yTicks.map((v, i) => (
+                        <g key={i}>
+                          <line
+                            x1={padL}
+                            x2={W - padR}
+                            y1={toY(v)}
+                            y2={toY(v)}
+                            stroke="rgba(148,163,184,0.15)"
+                            strokeDasharray="3,3"
+                          />
+                          <text
+                            x={padL - 4}
+                            y={toY(v) + 3}
+                            textAnchor="end"
+                            fill="#94a3b8"
+                            fontSize={10}
+                          >
+                            {v.toFixed(2)}
+                          </text>
+                        </g>
+                      ))}
+
+                      {/* X-axis labels */}
+                      {xLabels.map((xl, i) => (
+                        <text
+                          key={i}
+                          x={xl.x}
+                          y={H - 4}
+                          textAnchor="middle"
+                          fill="#94a3b8"
+                          fontSize={10}
+                        >
+                          {xl.label}
+                        </text>
+                      ))}
+
+                      {/* Gradient fill under line */}
+                      <defs>
+                        <linearGradient id="forecastGrad" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.35} />
+                          <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.04} />
+                        </linearGradient>
+                      </defs>
+                      <path d={areaPath} fill="url(#forecastGrad)" />
+
+                      {/* Line */}
+                      <polyline
+                        points={linePoints}
+                        fill="none"
+                        stroke="#3b82f6"
+                        strokeWidth={2}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                      />
+
+                      {/* Peak marker */}
+                      <circle cx={toX(peakIdx)} cy={toY(peakMW)} r={3.5} fill="#ef4444" />
+                      <text
+                        x={toX(peakIdx)}
+                        y={toY(peakMW) - 7}
+                        textAnchor="middle"
+                        fill="#ef4444"
+                        fontSize={9}
+                        fontWeight={600}
+                      >
+                        {peakMW.toFixed(2)}
+                      </text>
+
+                      {/* Current (first) marker */}
+                      <circle cx={toX(0)} cy={toY(pts[0].mw)} r={3} fill="#22c55e" />
+                    </svg>
+
+                    {/* Summary stats below chart */}
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 1fr 1fr',
+                        gap: 8,
+                        marginTop: 12,
+                        textAlign: 'center',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 11, opacity: 0.6 }}>Current</div>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: '#22c55e' }}>
+                          {pts[0].mw.toFixed(2)}
+                        </div>
+                        <div style={{ fontSize: 10, opacity: 0.5 }}>MW</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, opacity: 0.6 }}>Avg</div>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: '#3b82f6' }}>
+                          {avgMW.toFixed(2)}
+                        </div>
+                        <div style={{ fontSize: 10, opacity: 0.5 }}>MW</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, opacity: 0.6 }}>Peak</div>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: '#ef4444' }}>
+                          {peakMW.toFixed(2)}
+                        </div>
+                        <div style={{ fontSize: 10, opacity: 0.5 }}>
+                          MW @ {formatTime(pts[peakIdx].timestamp)}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Time range */}
+                    <div
+                      style={{
+                        marginTop: 14,
+                        padding: '8px 10px',
+                        background: 'rgba(148,163,184,0.08)',
+                        borderRadius: 6,
+                        fontSize: 11,
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        opacity: 0.7,
+                      }}
+                    >
+                      <span>From: {formatTime(pts[0].timestamp)}</span>
+                      <span>To: {formatTime(pts[pts.length - 1].timestamp)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           )}
 

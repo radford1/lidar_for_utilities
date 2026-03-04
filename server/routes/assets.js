@@ -226,4 +226,58 @@ router.get('/assets/:assetId/work-orders', (req, res) => {
   res.json({ asset_id: assetId, work_orders: orders });
 });
 
+// ---------------------------------------------------------------------------
+// GET /assets/:assetId/load-forecast
+// Returns synthetic load forecast (total MW) for the next 8 hours in
+// 15-minute intervals (33 data points including "now").
+// ---------------------------------------------------------------------------
+router.get('/assets/:assetId/load-forecast', (req, res) => {
+  const assetId = req.params.assetId;
+  const rng = seededRandom(hashCode(assetId + '_loadforecast'));
+
+  const now = new Date();
+  const hour = now.getHours() + now.getMinutes() / 60; // fractional hour
+
+  // Base load profile — realistic diurnal curve (MW)
+  // Peak in late afternoon / evening, trough overnight
+  const baseMW = 1.2 + rng() * 0.8; // 1.2 – 2.0 MW base for this pole's feeder segment
+  const peakMultiplier = 1.3 + rng() * 0.5; // 1.3 – 1.8x peak
+
+  function diurnalFactor(h) {
+    // Normalised 0-1 curve: trough ~3-5am, peak ~17-19h
+    const shifted = ((h - 4 + 24) % 24) / 24; // shift so 4am ≈ 0
+    // Double-hump: morning shoulder + evening peak
+    const evening = Math.exp(-0.5 * ((h - 18) / 2.5) ** 2);
+    const morning = 0.45 * Math.exp(-0.5 * ((h - 8) / 1.5) ** 2);
+    const base = 0.35;
+    return base + evening * 0.65 + morning * 0.25;
+  }
+
+  const points = [];
+  for (let i = 0; i <= 32; i++) {
+    const offsetMin = i * 15; // 0, 15, 30 … 480 minutes
+    const t = new Date(now.getTime() + offsetMin * 60 * 1000);
+    const h = t.getHours() + t.getMinutes() / 60;
+    const factor = diurnalFactor(h) * peakMultiplier;
+    // Add small noise per interval
+    const noise = 1 + (rng() - 0.5) * 0.08;
+    const mw = baseMW * factor * noise;
+
+    points.push({
+      timestamp: t.toISOString(),
+      offset_minutes: offsetMin,
+      mw: Math.round(mw * 1000) / 1000,
+    });
+  }
+
+  res.json({
+    asset_id: assetId,
+    generated_at: now.toISOString(),
+    horizon_hours: 8,
+    interval_minutes: 15,
+    unit: 'MW',
+    forecast: points,
+  });
+});
+
 export default router;
