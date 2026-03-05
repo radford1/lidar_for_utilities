@@ -1,5 +1,8 @@
 import { Router } from 'express';
 import axios from 'axios';
+import { readFileSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 
 const router = Router();
 
@@ -11,6 +14,115 @@ const SYSTEM_PROMPT =
   'You are a expert safety agent. Use lidar points around a workorder location to determine any safety hazards or special equipment needed';
 
 const catalog = process.env.CATALOG || 'stable_classic_sdir2v_catalog';
+
+// ---------------------------------------------------------------------------
+// Databricks auth — supports PAT, OAuth M2M (service principal), and
+// ~/.databrickscfg profiles.
+//
+// Resolution order:
+//   1. PAT token   — DATABRICKS_TOKEN env var
+//   2. OAuth M2M   — DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET env vars
+//      (used when deployed as a Databricks App with a service principal)
+//   3. Config profile — ~/.databrickscfg  (DATABRICKS_CONFIG_PROFILE, default DEFAULT)
+//
+// Host is resolved from DATABRICKS_SERVER_HOSTNAME / DATABRICKS_HOST or profile.
+// ---------------------------------------------------------------------------
+
+// --- OAuth M2M token cache ---
+let _oauthToken = null;   // cached access_token string
+let _oauthExpiry = 0;     // epoch ms when it expires (with 60s buffer)
+
+async function getOAuthToken(host, clientId, clientSecret) {
+  const now = Date.now();
+  if (_oauthToken && now < _oauthExpiry) return _oauthToken;
+
+  const url = `https://${host}/oidc/v1/token`;
+  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+  const response = await axios.post(
+    url,
+    'grant_type=client_credentials&scope=all-apis',
+    {
+      headers: {
+        Authorization: `Basic ${basic}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      timeout: 30_000,
+    }
+  );
+
+  const { access_token, expires_in } = response.data;
+  _oauthToken = access_token;
+  // Refresh 60 seconds before actual expiry
+  _oauthExpiry = now + (expires_in - 60) * 1000;
+  console.log('[safety-chat] OAuth token obtained, expires in', expires_in, 's');
+  return _oauthToken;
+}
+
+// --- Load static config at startup ---
+function loadDatabricksConfig() {
+  const envHost = (process.env.DATABRICKS_SERVER_HOSTNAME || process.env.DATABRICKS_HOST || '')
+    .replace(/^https?:\/\//, '').replace(/\/+$/, '') || null;
+  const envToken = process.env.DATABRICKS_TOKEN || null;
+  const envClientId = process.env.DATABRICKS_CLIENT_ID || null;
+  const envClientSecret = process.env.DATABRICKS_CLIENT_SECRET || null;
+
+  // If we have a PAT or OAuth creds with a host, we're done
+  if (envHost && (envToken || (envClientId && envClientSecret))) {
+    const authType = envToken ? 'pat' : 'oauth-m2m';
+    return { host: envHost, token: envToken, clientId: envClientId, clientSecret: envClientSecret, authType };
+  }
+
+  // Fall back to ~/.databrickscfg profile
+  const profileName = process.env.DATABRICKS_CONFIG_PROFILE || 'DEFAULT';
+  const cfgPath = join(homedir(), '.databrickscfg');
+  let host = envHost;
+  let token = envToken;
+  let clientId = envClientId;
+  let clientSecret = envClientSecret;
+
+  try {
+    const cfgText = readFileSync(cfgPath, 'utf-8');
+    let inProfile = false;
+
+    for (const raw of cfgText.split('\n')) {
+      const line = raw.trim();
+      if (line.startsWith('[')) {
+        const name = line.replace(/^\[/, '').replace(/\]$/, '').trim();
+        inProfile = name.toUpperCase() === profileName.toUpperCase();
+        continue;
+      }
+      if (!inProfile) continue;
+      const eqIdx = line.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = line.substring(0, eqIdx).trim().toLowerCase();
+      const value = line.substring(eqIdx + 1).trim();
+      if (key === 'host' && !host) host = value.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+      if (key === 'token' && !token) token = value;
+      if (key === 'client_id' && !clientId) clientId = value;
+      if (key === 'client_secret' && !clientSecret) clientSecret = value;
+    }
+  } catch { /* no config file — that's fine */ }
+
+  const authType = token ? 'pat' : (clientId && clientSecret) ? 'oauth-m2m' : 'none';
+  return { host, token, clientId, clientSecret, authType };
+}
+
+const _dbConfig = loadDatabricksConfig();
+
+// Resolve a Bearer token — either the static PAT or a refreshed OAuth token
+async function getBearerToken() {
+  if (_dbConfig.authType === 'pat') return _dbConfig.token;
+  if (_dbConfig.authType === 'oauth-m2m') {
+    return getOAuthToken(_dbConfig.host, _dbConfig.clientId, _dbConfig.clientSecret);
+  }
+  return null;
+}
+
+console.log('[safety-chat] Databricks config:', {
+  host: _dbConfig.host ? '***' + _dbConfig.host.slice(-20) : null,
+  authType: _dbConfig.authType,
+});
 
 // ---------------------------------------------------------------------------
 // Tool definition (OpenAI function-calling format)
@@ -51,7 +163,8 @@ async function executeGetPoints(db, lat, lng) {
 // ---------------------------------------------------------------------------
 // Streaming LLM call — returns a readable stream of SSE chunks
 // ---------------------------------------------------------------------------
-async function callLLMStream(host, token, messages) {
+async function callLLMStream(host, messages) {
+  const token = await getBearerToken();
   const url = `https://${host}/serving-endpoints/${LLM_ENDPOINT}/invocations`;
   const response = await axios.post(
     url,
@@ -71,7 +184,8 @@ async function callLLMStream(host, token, messages) {
 // ---------------------------------------------------------------------------
 // Non-streaming LLM call (used for tool-call iterations)
 // ---------------------------------------------------------------------------
-async function callLLM(host, token, messages) {
+async function callLLM(host, messages) {
+  const token = await getBearerToken();
   const url = `https://${host}/serving-endpoints/${LLM_ENDPOINT}/invocations`;
   const response = await axios.post(
     url,
@@ -118,11 +232,10 @@ router.post('/safety-chat', async (req, res) => {
     const { lat, lng, messages: clientMessages, sessionId } = req.body || {};
 
     const db = req.app.get('db');
-    const host = process.env.DATABRICKS_SERVER_HOSTNAME || process.env.DATABRICKS_HOST;
-    const token = process.env.DATABRICKS_TOKEN;
+    const { host, authType } = _dbConfig;
 
-    if (!host) return res.status(500).json({ error: 'DATABRICKS_SERVER_HOSTNAME is not configured' });
-    if (!token) return res.status(500).json({ error: 'DATABRICKS_TOKEN is not configured' });
+    if (!host) return res.status(500).json({ error: 'Databricks host not configured (set DATABRICKS_SERVER_HOSTNAME or use a config profile)' });
+    if (authType === 'none') return res.status(500).json({ error: 'Databricks auth not configured (set DATABRICKS_TOKEN, or DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET, or use a config profile)' });
 
     // Build message list starting with system prompt
     const llmMessages = [{ role: 'system', content: SYSTEM_PROMPT }];
@@ -149,7 +262,7 @@ router.post('/safety-chat', async (req, res) => {
 
     // --- Tool-calling loop (non-streaming) ---
     for (let i = 0; i < MAX_ITERATIONS; i++) {
-      const llmResponse = await callLLM(host, token, llmMessages);
+      const llmResponse = await callLLM(host, llmMessages);
       const choice = llmResponse.choices?.[0];
 
       if (!choice) {
@@ -206,7 +319,7 @@ router.post('/safety-chat', async (req, res) => {
 
     console.log('[safety-chat] streaming final response');
 
-    const stream = await callLLMStream(host, token, llmMessages);
+    const stream = await callLLMStream(host, llmMessages);
 
     let buffer = '';
     stream.on('data', (chunk) => {
