@@ -4,6 +4,7 @@ import cors from 'cors';
 import DatabricksSql from './databricks_sql.js';
 import h3Router from './routes/h3.js';
 import assetsRouter from './routes/assets.js';
+import safetyRouter from './routes/safety.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -17,6 +18,7 @@ app.set('db', db);
 
 app.use('/api', (req, _res, next) => { req.db = db; next(); }, h3Router);
 app.use('/api', assetsRouter);
+app.use('/api', safetyRouter);
 
 // Serve static client build in production
 const __filename = fileURLToPath(import.meta.url);

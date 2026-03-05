@@ -5,8 +5,9 @@ import MapGL, { NavigationControl } from 'react-map-gl';
 import DeckGL from '@deck.gl/react';
 import { OrbitView, COORDINATE_SYSTEM } from '@deck.gl/core';
 import { H3HexagonLayer } from '@deck.gl/geo-layers';
-import { LineLayer, PathLayer, PointCloudLayer, ScatterplotLayer } from '@deck.gl/layers';
+import { IconLayer, LineLayer, PathLayer, PointCloudLayer, ScatterplotLayer } from '@deck.gl/layers';
 import PoleInfoPanel from './components/PoleInfoPanel';
+import WorkOrderPanel, { type WorkOrder as WorkOrderType } from './components/WorkOrderPanel';
 import { generateRadarFrames, type RadarCell } from './utils/weatherRadar';
 
 type LidarPoint = { x: number; y: number; z: number; classification?: number; lat?: number; lng?: number; is_encroaching?: boolean };
@@ -14,6 +15,46 @@ type Pole = { pole_id: string; lat: number; lng: number; height_m: number; conne
 type Segment = { source: [number, number, number]; target: [number, number, number] };
 type Conductor = { path: [number, number, number][], color: [number, number, number, number] };
 type PoleSegment = { pole_id: string; source: [number, number, number]; target: [number, number, number] };
+
+// ---------------------------------------------------------------------------
+// Scheduled Work Orders — hardcoded demo data
+// ---------------------------------------------------------------------------
+const WORK_ORDERS: WorkOrderType[] = [
+  {
+    id: 'WO-2025-0042',
+    lat: 38.49086881114151,
+    lng: -121.16150990116222,
+    type: 'Vegetation Trim',
+    status: 'SCHEDULED',
+    scheduledDate: '2025-07-15',
+    crew: 'Crew-7',
+    priority: 'HIGH',
+    description: 'Trim encroaching vegetation within 10 ft clearance zone on 12 kV feeder span. Multiple tree species identified via LiDAR with canopy heights exceeding minimum approach distance.',
+  },
+  {
+    id: 'WO-2025-0078',
+    lat: 38.478338594053334,
+    lng: -121.16867676318374,
+    type: 'Pole Inspection',
+    status: 'SCHEDULED',
+    scheduledDate: '2025-07-22',
+    crew: 'Crew-12',
+    priority: 'MEDIUM',
+    description: 'Scheduled structural assessment of wood pole showing elevated cumulative weather stress. LiDAR scan indicates possible lean deviation. Verify ground-line condition and crossarm hardware.',
+  },
+];
+
+// Yellow triangle SVG encoded as a data URL for the IconLayer atlas
+const TRIANGLE_ICON_ATLAS = (() => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+    <polygon points="32,4 60,56 4,56" fill="#fbbf24" stroke="#92400e" stroke-width="3" stroke-linejoin="round"/>
+  </svg>`;
+  return `data:image/svg+xml;base64,${btoa(svg)}`;
+})();
+
+const TRIANGLE_ICON_MAPPING = {
+  triangle: { x: 0, y: 0, width: 64, height: 64, anchorY: 56 },
+};
 
 export default function App() {
   const [mapboxToken, setMapboxToken] = useState<string | null>(null);
@@ -46,6 +87,10 @@ export default function App() {
   const [chatSending, setChatSending] = useState(false);
   const [chatConversationId, setChatConversationId] = useState<string | null>(null);
   const [selectedPoleId, setSelectedPoleId] = useState<string | null>(null);
+
+  // Work orders state
+  const [showWorkOrders, setShowWorkOrders] = useState(true);
+  const [selectedWorkOrder, setSelectedWorkOrder] = useState<WorkOrderType | null>(null);
 
   // Weather radar state
   const [showRadar, setShowRadar] = useState(false);
@@ -330,6 +375,29 @@ export default function App() {
       pickable: false,
     });
   }, [showRadar, radarFrame, radarFrames]);
+
+  // Work Orders IconLayer — yellow triangles
+  const workOrderLayer = useMemo(() => {
+    if (!showWorkOrders) return null as any;
+    return new IconLayer<WorkOrderType>({
+      id: 'work-orders',
+      data: WORK_ORDERS,
+      getPosition: (d: WorkOrderType) => [d.lng, d.lat] as [number, number],
+      getIcon: () => 'triangle',
+      getSize: 24,
+      sizeUnits: 'pixels' as const,
+      sizeMinPixels: 24,
+      sizeMaxPixels: 24,
+      iconAtlas: TRIANGLE_ICON_ATLAS,
+      iconMapping: TRIANGLE_ICON_MAPPING,
+      pickable: true,
+      onClick: (info: any) => {
+        if (info.object) {
+          setSelectedWorkOrder(info.object as WorkOrderType);
+        }
+      },
+    });
+  }, [showWorkOrders]);
 
   const centered = useMemo(() => {
     if (!points || points.length === 0) return { data: [], centroid: [0, 0, 0] as [number, number, number] };
@@ -655,7 +723,7 @@ export default function App() {
       <DeckGL
         initialViewState={viewState}
         controller={true}
-        layers={[h3Layer, vegIconLayer, radarLayer].filter(Boolean) as any}
+        layers={[h3Layer, vegIconLayer, radarLayer, workOrderLayer].filter(Boolean) as any}
       >
         {!!mapboxToken && (
           <MapGL
@@ -726,6 +794,10 @@ export default function App() {
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <input type="checkbox" checked={showRadar} onChange={e => setShowRadar(e.target.checked)} />
           Radar
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" checked={showWorkOrders} onChange={e => setShowWorkOrders(e.target.checked)} />
+          <span style={{ color: '#fbbf24' }}>&#9650;</span> Work Orders
         </label>
         {/* Chat FAB bottom-right */}
       </div>
@@ -1034,6 +1106,25 @@ export default function App() {
             }}>{woSubmitting ? 'Creating...' : 'Create'}</button>
           </div>
           {woResult && <div style={{ marginTop: 8, fontSize: 12 }}>{woResult}</div>}
+        </div>
+      )}
+      {/* Work Order detail / safety chat panel */}
+      {selectedWorkOrder && (
+        <div style={{
+          position: 'absolute',
+          top: 50,
+          right: 10,
+          bottom: 50,
+          width: 400,
+          zIndex: 5,
+          borderRadius: 10,
+          overflow: 'hidden',
+          boxShadow: '0 12px 28px rgba(0,0,0,0.35)',
+        }}>
+          <WorkOrderPanel
+            workOrder={selectedWorkOrder}
+            onClose={() => setSelectedWorkOrder(null)}
+          />
         </div>
       )}
       {hoverVisible && hoverHex && (
